@@ -1,3 +1,4 @@
+# app.py
 import io
 import re
 import warnings
@@ -26,7 +27,7 @@ st.set_page_config(
 DEFAULT_DATA_PATH = Path(__file__).parent / "netflix_titles.csv"
 
 # =========================================================
-# CSS
+# CSS (Netflix-like)
 # =========================================================
 NETFLIX_CSS = r"""
 <style>
@@ -43,6 +44,7 @@ NETFLIX_CSS = r"""
   --muted:#BBBBBB;
   --good:#00B894;
   --warn:#FDCB6E;
+  --info:#2F80ED;
 }
 
 *{
@@ -311,9 +313,10 @@ div[data-baseweb="popover"] div[role="option"][aria-selected="true"]{
 st.markdown(NETFLIX_CSS, unsafe_allow_html=True)
 
 # =========================================================
-# UI HELPERS (gunakan ini, bukan st.info untuk HTML)
+# UI HELPERS
 # =========================================================
-def ui_alert(kind: str, html: str) -> None:
+def ui_alert(kind: str, text: str) -> None:
+    """No raw HTML tags required; just plain text / markdown content."""
     palette = {
         "info": ("#2F80ED", "rgba(47, 128, 237, 0.14)", "ℹ️"),
         "success": ("#00B894", "rgba(0, 184, 148, 0.15)", "✅"),
@@ -335,7 +338,7 @@ def ui_alert(kind: str, html: str) -> None:
           <div style="display:flex; gap:0.9rem; align-items:flex-start;">
             <div style="font-size:1.5rem; line-height:1; color:{border};">{icon}</div>
             <div style="flex:1; color:#FFF !important; font-weight:750; line-height:1.45;">
-              {html}
+              {text}
             </div>
           </div>
         </div>
@@ -568,9 +571,8 @@ def create_dashboard_stats(df: pd.DataFrame) -> dict:
     return stats
 
 # =========================================================
-# EVALUATION (WEB ONLY) — NO MANUAL TABLES HERE
+# EVALUATION (WEB) — Precision@K, Recall@K, F1@K
 # Proxy relevansi: genre overlap >= N (+ optional same type)
-# Precision@K, Recall@K, F1@K
 # =========================================================
 def _genres_set(x: object) -> set:
     s = _safe_str(x)
@@ -578,58 +580,55 @@ def _genres_set(x: object) -> set:
         return set()
     return {g.strip().lower() for g in s.split(",") if g.strip()}
 
-def eval_prf_at_k(
+def evaluate_prf_at_k(
     selected_row: pd.Series,
     recs: pd.DataFrame,
     df_all: pd.DataFrame,
-    k: int,
-    require_same_type: bool = True,
+    k: int = 10,
     min_genre_overlap: int = 1,
-) -> dict:
+    require_same_type: bool = True,
+) -> Optional[dict]:
     if selected_row is None or recs is None or recs.empty:
-        return {"k": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "hit": 0, "total_rel": 0, "detail": pd.DataFrame()}
+        return None
 
-    sel_type = _safe_str(selected_row.get("type", ""))
     sel_genres = _genres_set(selected_row.get("listed_in", ""))
+    sel_type = _safe_str(selected_row.get("type", ""))
 
-    # relevant set from full dataset (proxy offline)
-    rel_set = set()
-    for i, r in df_all.iterrows():
-        if i == selected_row.name:
+    # ground truth proxy set
+    relevant_set = set()
+    for idx, row in df_all.iterrows():
+        if idx == selected_row.name:
             continue
-        if require_same_type and _safe_str(r.get("type", "")) != sel_type:
+        if require_same_type and _safe_str(row.get("type", "")) != sel_type:
             continue
-        overlap = len(sel_genres.intersection(_genres_set(r.get("listed_in", ""))))
+        overlap = len(sel_genres.intersection(_genres_set(row.get("listed_in", ""))))
         if overlap >= int(min_genre_overlap):
-            rel_set.add(i)
+            relevant_set.add(idx)
 
     k = int(min(k, len(recs)))
     topk = recs.head(k).copy()
     pred_set = set(topk.index.tolist())
+    hit = len(pred_set.intersection(relevant_set))
 
-    hit = len(pred_set.intersection(rel_set))
     precision = hit / float(k) if k > 0 else 0.0
-    recall = hit / float(len(rel_set)) if len(rel_set) > 0 else 0.0
+    recall = hit / float(len(relevant_set)) if len(relevant_set) > 0 else 0.0
     f1 = 0.0 if (precision + recall) == 0 else (2 * precision * recall / (precision + recall))
 
-    # detail (untuk transparansi evaluasi di web)
-    topk["genre_overlap"] = [
-        len(sel_genres.intersection(_genres_set(df_all.loc[i, "listed_in"]))) for i in topk.index
-    ]
-    topk["relevant"] = [i in rel_set for i in topk.index]
+    topk["genre_overlap"] = [len(sel_genres.intersection(_genres_set(df_all.loc[i, "listed_in"]))) for i in topk.index]
+    topk["relevant"] = [i in relevant_set for i in topk.index]
 
     return {
         "k": k,
         "hit": hit,
-        "total_rel": len(rel_set),
+        "total_relevant": len(relevant_set),
         "precision": precision,
         "recall": recall,
         "f1": f1,
         "detail": topk,
     }
 
-def render_eval_visuals_prf(eval_out: dict) -> None:
-    if not eval_out or eval_out.get("k", 0) == 0:
+def render_eval(eval_out: Optional[dict]) -> None:
+    if not eval_out:
         ui_alert("warning", "Evaluasi belum tersedia (rekomendasi kosong).")
         return
 
@@ -638,18 +637,14 @@ def render_eval_visuals_prf(eval_out: dict) -> None:
     r = float(eval_out["recall"])
     f1 = float(eval_out["f1"])
     hit = int(eval_out["hit"])
-    total_rel = int(eval_out["total_rel"])
+    total_rel = int(eval_out["total_relevant"])
     detail = eval_out["detail"].copy()
 
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric(f"Precision@{k}", f"{p:.3f}", f"{p:.1%}")
-    with m2:
-        st.metric(f"Recall@{k}", f"{r:.3f}", f"{r:.1%}")
-    with m3:
-        st.metric(f"F1@{k}", f"{f1:.3f}", f"{f1:.1%}")
-    with m4:
-        st.metric("Hit / Total Rel", f"{hit}", f"dari {total_rel}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Precision@{k}", f"{p:.3f}", f"{p:.1%}")
+    c2.metric(f"Recall@{k}", f"{r:.3f}", f"{r:.1%}")
+    c3.metric(f"F1@{k}", f"{f1:.3f}", f"{f1:.1%}")
+    c4.metric("Hit / Total Rel", f"{hit}", f"dari {total_rel}")
 
     st.markdown("### 📊 Relevan vs Tidak Relevan (Top-K)")
     comp = pd.Series({"Relevan": hit, "Tidak relevan": max(0, k - hit)})
@@ -672,16 +667,6 @@ def render_eval_visuals_prf(eval_out: dict) -> None:
     show_cols = ["title", "type", "release_year", "listed_in", "genre_overlap", "relevant", "similarity"]
     show_cols = [c for c in show_cols if c in detail.columns]
     st.dataframe(detail[show_cols], use_container_width=True)
-
-# =========================================================
-# SESSION STATE INIT
-# =========================================================
-if "recs" not in st.session_state:
-    st.session_state["recs"] = pd.DataFrame()
-if "selected_item" not in st.session_state:
-    st.session_state["selected_item"] = None
-if "selected_idx" not in st.session_state:
-    st.session_state["selected_idx"] = None
 
 # =========================================================
 # UI CARDS
@@ -899,11 +884,7 @@ elif use_local:
 if not data_loaded:
     ui_alert(
         "info",
-        """
-        <b>Cara pakai:</b><br>
-        1) Upload CSV Netflix, atau<br>
-        2) Letakkan <code>netflix_titles.csv</code> di folder yang sama dengan <code>app.py</code>.
-        """,
+        "Cara pakai: 1) Upload CSV Netflix, atau 2) Letakkan netflix_titles.csv di folder yang sama dengan app.py",
     )
     st.stop()
 
@@ -924,10 +905,38 @@ type_options = ["All"] + unique_types
 min_year = stats.get("min_year", 1900)
 max_year = stats.get("max_year", datetime.now().year)
 
-# Sidebar stats
 with st.sidebar:
     st.markdown('<div class="sidebar-title">📊 STATUS</div>', unsafe_allow_html=True)
-    ui_alert("success", "<b>SISTEM AKTIF</b><br>Dataset berhasil diproses")
+    ui_alert("success", "SISTEM AKTIF — Dataset berhasil diproses")
+
+    st.markdown('<div class="sidebar-title">📌 RINGKASAN DATA</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="stats-card">
+          <div style="display:flex; justify-content:space-between; gap:1rem;">
+            <div>
+              <div style="color:var(--muted); font-weight:800;">TOTAL</div>
+              <div style="font-size:1.8rem; font-weight:900; color:#FFF;">{stats['total']:,}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="color:var(--muted); font-weight:800;">MOVIE</div>
+              <div style="font-size:1.8rem; font-weight:900; color:#FFF;">{stats['movies']:,}</div>
+            </div>
+          </div>
+          <div style="display:flex; justify-content:space-between; gap:1rem; margin-top:0.8rem;">
+            <div>
+              <div style="color:var(--muted); font-weight:800;">TV SHOW</div>
+              <div style="font-size:1.6rem; font-weight:900; color:#FFF;">{stats['tv_shows']:,}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="color:var(--muted); font-weight:800;">TAHUN</div>
+              <div style="font-size:1.6rem; font-weight:900; color:#FFF;">{stats['min_year']}–{stats['max_year']}</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 # =========================================================
 # PAGE: REKOMENDASI
@@ -935,11 +944,15 @@ with st.sidebar:
 if page == "🎯 REKOMENDASI":
     tabs = st.tabs(["🎬 Berdasarkan Judul", "🔍 Berdasarkan Kata Kunci", "⭐ Konten Populer"])
 
+    # -------------------------
+    # TAB 1: TITLE-BASED
+    # -------------------------
     with tabs[0]:
         col1, col2 = st.columns([2, 1])
 
         with col1:
             st.markdown("## 🎯 Pilih Konten untuk Direkomendasikan")
+
             st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
             st.markdown("### 📝 Pilih Judul")
 
@@ -984,7 +997,7 @@ if page == "🎯 REKOMENDASI":
             with f3:
                 same_type = st.checkbox("Tipe sama", value=True, key="same_type_check")
 
-            year_min, year_max = year_range
+            year_min_sel, year_max_sel = year_range
             st.markdown("</div>", unsafe_allow_html=True)
 
             if st.button("🚀 Dapatkan Rekomendasi", type="primary", key="get_recs_btn"):
@@ -992,21 +1005,20 @@ if page == "🎯 REKOMENDASI":
                 if matches.empty:
                     ui_alert("error", "Judul tidak ditemukan.")
                 else:
-                    idx = matches.index[0]
+                    idx = int(matches.index[0])
                     selected_item = df.loc[idx]
 
                     with st.spinner("Mencari rekomendasi terbaik..."):
                         recs = recommend_by_index(
-                            idx=int(idx),
+                            idx=idx,
                             df=df,
                             tfidf_matrix=tfidf_matrix,
                             top_n=int(top_n),
                             same_type=bool(same_type),
-                            year_min=int(year_min),
-                            year_max=int(year_max),
+                            year_min=int(year_min_sel),
+                            year_max=int(year_max_sel),
                         )
 
-                    st.session_state["selected_idx"] = int(idx)
                     st.session_state["selected_item"] = selected_item
                     st.session_state["recs"] = recs
 
@@ -1019,66 +1031,37 @@ if page == "🎯 REKOMENDASI":
                 display_selected_card(selected_item)
 
                 st.markdown("---")
-                ui_alert("success", f"Menampilkan <b>{len(recs)}</b> rekomendasi teratas.")
-                for i, (_, r0) in enumerate(recs.iterrows(), 1):
-                    display_recommendation_card(r0, i)
+                ui_alert("success", f"Menampilkan {len(recs)} rekomendasi teratas.")
+                for i, (_, rr) in enumerate(recs.iterrows(), 1):
+                    display_recommendation_card(rr, i)
 
                 # ============================
-                # EVALUASI (WEB ONLY)
+                # EVALUASI (NO HTML TAGS)
                 # ============================
                 st.markdown("---")
                 st.markdown("## ✅ Evaluasi Model (Precision@K, Recall@K, F1@K)")
 
-                # ✅ INI YANG DIPERBAIKI: pakai ui_alert (HTML aman), bukan st.info
-                ui_alert(
-                    "info",
-                    """
-                    Evaluasi dilakukan secara <b>offline</b> karena dataset Netflix Titles tidak punya interaksi user (rating/watch history).
-                    <br><br>
-                    <b>Proxy relevansi:</b> rekomendasi dianggap relevan jika <b>genre overlap</b> ≥ N dan (opsional) tipe konten sama.
-                    """,
-                )
-
                 max_k = int(min(20, len(recs)))
-                min_k = int(min(5, max_k))
-                default_k = int(min(10, max_k))
+                k_val = st.slider("Nilai K (Top-K)", min_value=5, max_value=max_k, value=min(10, max_k))
+                min_overlap = st.selectbox("Minimal genre overlap", [1, 2, 3], index=0)
+                same_type_eval = st.checkbox("Wajib tipe konten sama (Movie/TV)", value=True)
 
-                ecol1, ecol2, ecol3 = st.columns([1.2, 1.2, 1.6])
-                with ecol1:
-                    eval_k = st.slider(
-                        "K untuk evaluasi",
-                        min_value=min_k,
-                        max_value=max_k,
-                        value=default_k,
-                        step=1,
-                        key="eval_k_title",
-                    )
-                with ecol2:
-                    min_overlap = st.selectbox("Minimal genre overlap", [1, 2, 3], index=0, key="min_overlap_title")
-                with ecol3:
-                    require_same_type_eval = st.checkbox(
-                        "Wajib tipe sama (Movie/TV)",
-                        value=True,
-                        key="require_same_type_eval_title",
-                    )
-
-                eval_out = eval_prf_at_k(
+                eval_out = evaluate_prf_at_k(
                     selected_row=selected_item,
                     recs=recs,
                     df_all=df,
-                    k=int(eval_k),
-                    require_same_type=bool(require_same_type_eval),
+                    k=int(k_val),
                     min_genre_overlap=int(min_overlap),
+                    require_same_type=bool(same_type_eval),
                 )
-                render_eval_visuals_prf(eval_out)
+                render_eval(eval_out)
 
-                if st.button("🧹 Reset Hasil", key="reset_results"):
+                if st.button("🧹 Reset Hasil"):
                     st.session_state["recs"] = pd.DataFrame()
                     st.session_state["selected_item"] = None
-                    st.session_state["selected_idx"] = None
                     st.rerun()
             else:
-                ui_alert("info", "Klik <b>🚀 Dapatkan Rekomendasi</b> untuk menampilkan rekomendasi & evaluasi.")
+                ui_alert("info", "Klik tombol '🚀 Dapatkan Rekomendasi' untuk menampilkan rekomendasi & evaluasi.")
 
         with col2:
             st.markdown("## 📊 Statistik Dataset")
@@ -1092,6 +1075,9 @@ if page == "🎯 REKOMENDASI":
             if len(top_genres) > 0:
                 st.bar_chart(top_genres)
 
+    # -------------------------
+    # TAB 2: QUERY-BASED
+    # -------------------------
     with tabs[1]:
         st.markdown("## 🔍 Pencarian Berdasarkan Kata Kunci")
 
@@ -1141,10 +1127,13 @@ if page == "🎯 REKOMENDASI":
                 if recs_q.empty:
                     ui_alert("error", "Tidak ada hasil. Coba keyword bahasa Inggris yang lebih umum.")
                 else:
-                    ui_alert("success", f"Ditemukan <b>{len(recs_q)}</b> hasil teratas.")
-                    for i, (_, r1) in enumerate(recs_q.iterrows(), 1):
-                        display_recommendation_card(r1, i)
+                    ui_alert("success", f"Ditemukan {len(recs_q)} hasil teratas.")
+                    for i, (_, rr) in enumerate(recs_q.iterrows(), 1):
+                        display_recommendation_card(rr, i)
 
+    # -------------------------
+    # TAB 3: POPULAR
+    # -------------------------
     with tabs[2]:
         st.markdown("## ⭐ Konten Populer (Sampling)")
         sample_size = min(8, len(df))
@@ -1157,6 +1146,9 @@ if page == "🎯 REKOMENDASI":
                 tmp["similarity"] = 0.0
                 display_recommendation_card(tmp, i + 1)
 
+# =========================================================
+# PAGE: DASHBOARD
+# =========================================================
 elif page == "📊 DASHBOARD ANALITIK":
     st.markdown("## 📊 Dashboard Analitik Netflix")
 
@@ -1185,6 +1177,9 @@ elif page == "📊 DASHBOARD ANALITIK":
         year_counts = df["release_year"][df["release_year"] > 0].value_counts().sort_index()
         st.line_chart(year_counts)
 
+# =========================================================
+# PAGE: ABOUT
+# =========================================================
 else:
     st.markdown("## 🤖 Tentang Sistem")
     st.markdown(
@@ -1192,14 +1187,14 @@ else:
         <div class="glass-panel">
           <h3 style="color:var(--red) !important;">📌 Ringkasan</h3>
           <p style="line-height:1.55;">
-            Sistem ini menggunakan <b>Content-Based Filtering</b> pada metadata Netflix
+            Sistem ini menggunakan <b>Content-Based Filtering</b> dari metadata Netflix
             (judul, genre, cast, director, negara, rating, deskripsi).
             Teks diubah menjadi vektor dengan <b>TF-IDF</b>, lalu kemiripan dihitung dengan
             <b>Cosine Similarity</b> (via <i>linear_kernel</i>).
           </p>
           <p style="line-height:1.55;">
-            Evaluasi di web menggunakan <b>Precision@K</b>, <b>Recall@K</b>, dan <b>F1@K</b> dengan proxy relevansi
-            berbasis <i>genre overlap</i>, karena dataset tidak menyediakan label interaksi user.
+            Evaluasi di website memakai <b>Precision@K</b>, <b>Recall@K</b>, dan <b>F1@K</b>
+            berbasis proxy relevansi <i>genre overlap</i> (karena dataset tidak punya label interaksi user).
           </p>
         </div>
         """,
