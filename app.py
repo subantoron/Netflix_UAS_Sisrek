@@ -311,11 +311,11 @@ div[data-baseweb="popover"] div[role="option"][aria-selected="true"]{
 st.markdown(NETFLIX_CSS, unsafe_allow_html=True)
 
 # =========================================================
-# UI HELPERS
+# UI HELPERS (gunakan ini, bukan st.info untuk HTML)
 # =========================================================
 def ui_alert(kind: str, html: str) -> None:
     palette = {
-        "info": ("#E50914", "rgba(229, 9, 20, 0.15)", "ℹ️"),
+        "info": ("#2F80ED", "rgba(47, 128, 237, 0.14)", "ℹ️"),
         "success": ("#00B894", "rgba(0, 184, 148, 0.15)", "✅"),
         "warning": ("#FDCB6E", "rgba(253, 203, 110, 0.15)", "⚠️"),
         "error": ("#E50914", "rgba(229, 9, 20, 0.15)", "⛔"),
@@ -568,9 +568,9 @@ def create_dashboard_stats(df: pd.DataFrame) -> dict:
     return stats
 
 # =========================================================
-# EVALUATION (WEB ONLY, NO MANUAL STEPS)
-# Proxy relevance: genre overlap (>= N) + optional same type
-# Metrics: Precision@K, Recall@K, F1@K
+# EVALUATION (WEB ONLY) — NO MANUAL TABLES HERE
+# Proxy relevansi: genre overlap >= N (+ optional same type)
+# Precision@K, Recall@K, F1@K
 # =========================================================
 def _genres_set(x: object) -> set:
     s = _safe_str(x)
@@ -592,7 +592,7 @@ def eval_prf_at_k(
     sel_type = _safe_str(selected_row.get("type", ""))
     sel_genres = _genres_set(selected_row.get("listed_in", ""))
 
-    # Relevant set from full dataset (proxy offline)
+    # relevant set from full dataset (proxy offline)
     rel_set = set()
     for i, r in df_all.iterrows():
         if i == selected_row.name:
@@ -612,7 +612,7 @@ def eval_prf_at_k(
     recall = hit / float(len(rel_set)) if len(rel_set) > 0 else 0.0
     f1 = 0.0 if (precision + recall) == 0 else (2 * precision * recall / (precision + recall))
 
-    # detail for transparency (still evaluation, not manual derivation)
+    # detail (untuk transparansi evaluasi di web)
     topk["genre_overlap"] = [
         len(sel_genres.intersection(_genres_set(df_all.loc[i, "listed_in"]))) for i in topk.index
     ]
@@ -652,7 +652,7 @@ def render_eval_visuals_prf(eval_out: dict) -> None:
         st.metric("Hit / Total Rel", f"{hit}", f"dari {total_rel}")
 
     st.markdown("### 📊 Relevan vs Tidak Relevan (Top-K)")
-    comp = pd.Series({"Relevan": hit, "Tidak relevan": k - hit})
+    comp = pd.Series({"Relevan": hit, "Tidak relevan": max(0, k - hit)})
     st.bar_chart(comp)
 
     st.markdown("### 🧪 Distribusi Similarity (Top-K)")
@@ -660,6 +660,7 @@ def render_eval_visuals_prf(eval_out: dict) -> None:
         sim_vals = detail["similarity"].astype(float)
         bins = pd.cut(sim_vals, bins=8)
         sim_bins = bins.value_counts().sort_index()
+
         sim_df = sim_bins.reset_index()
         sim_df.columns = ["bin", "count"]
         sim_df["bin"] = sim_df["bin"].astype(str)
@@ -882,6 +883,7 @@ if uploaded is not None:
         ui_alert("success", f"<b>Dataset berhasil dimuat</b> — {len(raw_df):,} baris")
     else:
         ui_alert("error", "Dataset upload kosong / tidak valid.")
+
 elif use_local:
     if DEFAULT_DATA_PATH.exists():
         with st.spinner("Memuat dataset lokal..."):
@@ -927,44 +929,12 @@ with st.sidebar:
     st.markdown('<div class="sidebar-title">📊 STATUS</div>', unsafe_allow_html=True)
     ui_alert("success", "<b>SISTEM AKTIF</b><br>Dataset berhasil diproses")
 
-    st.markdown('<div class="sidebar-title">📌 RINGKASAN DATA</div>', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-        <div class="stats-card">
-          <div style="display:flex; justify-content:space-between; gap:1rem;">
-            <div>
-              <div style="color:var(--muted); font-weight:800;">TOTAL</div>
-              <div style="font-size:1.8rem; font-weight:900; color:#FFF;">{stats['total']:,}</div>
-            </div>
-            <div style="text-align:right;">
-              <div style="color:var(--muted); font-weight:800;">MOVIE</div>
-              <div style="font-size:1.8rem; font-weight:900; color:#FFF;">{stats['movies']:,}</div>
-            </div>
-          </div>
-          <div style="display:flex; justify-content:space-between; gap:1rem; margin-top:0.8rem;">
-            <div>
-              <div style="color:var(--muted); font-weight:800;">TV SHOW</div>
-              <div style="font-size:1.6rem; font-weight:900; color:#FFF;">{stats['tv_shows']:,}</div>
-            </div>
-            <div style="text-align:right;">
-              <div style="color:var(--muted); font-weight:800;">TAHUN</div>
-              <div style="font-size:1.6rem; font-weight:900; color:#FFF;">{stats['min_year']}–{stats['max_year']}</div>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
 # =========================================================
 # PAGE: REKOMENDASI
 # =========================================================
 if page == "🎯 REKOMENDASI":
     tabs = st.tabs(["🎬 Berdasarkan Judul", "🔍 Berdasarkan Kata Kunci", "⭐ Konten Populer"])
 
-    # -------------------------
-    # TAB 1: TITLE-BASED
-    # -------------------------
     with tabs[0]:
         col1, col2 = st.columns([2, 1])
 
@@ -1040,7 +1010,6 @@ if page == "🎯 REKOMENDASI":
                     st.session_state["selected_item"] = selected_item
                     st.session_state["recs"] = recs
 
-            # render hasil persist
             recs = st.session_state.get("recs", pd.DataFrame())
             selected_item = st.session_state.get("selected_item", None)
 
@@ -1060,6 +1029,7 @@ if page == "🎯 REKOMENDASI":
                 st.markdown("---")
                 st.markdown("## ✅ Evaluasi Model (Precision@K, Recall@K, F1@K)")
 
+                # ✅ INI YANG DIPERBAIKI: pakai ui_alert (HTML aman), bukan st.info
                 ui_alert(
                     "info",
                     """
@@ -1122,9 +1092,6 @@ if page == "🎯 REKOMENDASI":
             if len(top_genres) > 0:
                 st.bar_chart(top_genres)
 
-    # -------------------------
-    # TAB 2: QUERY-BASED
-    # -------------------------
     with tabs[1]:
         st.markdown("## 🔍 Pencarian Berdasarkan Kata Kunci")
 
@@ -1178,9 +1145,6 @@ if page == "🎯 REKOMENDASI":
                     for i, (_, r1) in enumerate(recs_q.iterrows(), 1):
                         display_recommendation_card(r1, i)
 
-    # -------------------------
-    # TAB 3: POPULAR
-    # -------------------------
     with tabs[2]:
         st.markdown("## ⭐ Konten Populer (Sampling)")
         sample_size = min(8, len(df))
@@ -1193,9 +1157,6 @@ if page == "🎯 REKOMENDASI":
                 tmp["similarity"] = 0.0
                 display_recommendation_card(tmp, i + 1)
 
-# =========================================================
-# PAGE: DASHBOARD
-# =========================================================
 elif page == "📊 DASHBOARD ANALITIK":
     st.markdown("## 📊 Dashboard Analitik Netflix")
 
@@ -1224,9 +1185,6 @@ elif page == "📊 DASHBOARD ANALITIK":
         year_counts = df["release_year"][df["release_year"] > 0].value_counts().sort_index()
         st.line_chart(year_counts)
 
-# =========================================================
-# PAGE: ABOUT
-# =========================================================
 else:
     st.markdown("## 🤖 Tentang Sistem")
     st.markdown(
@@ -1240,9 +1198,8 @@ else:
             <b>Cosine Similarity</b> (via <i>linear_kernel</i>).
           </p>
           <p style="line-height:1.55;">
-            <b>Evaluasi</b> ditampilkan di halaman rekomendasi menggunakan metrik <b>Precision@K</b>,
-            <b>Recall@K</b>, dan <b>F1@K</b> dengan proxy relevansi berbasis <i>genre overlap</i> (karena
-            dataset tidak memiliki label interaksi user).
+            Evaluasi di web menggunakan <b>Precision@K</b>, <b>Recall@K</b>, dan <b>F1@K</b> dengan proxy relevansi
+            berbasis <i>genre overlap</i>, karena dataset tidak menyediakan label interaksi user.
           </p>
         </div>
         """,
