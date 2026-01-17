@@ -434,7 +434,10 @@ def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
         if old_name in df.columns and new_name not in df.columns:
             df[new_name] = df[old_name]
 
-    expected = ["show_id","type","title","director","cast","country","release_year","rating","duration","listed_in","description"]
+    expected = [
+        "show_id","type","title","director","cast","country",
+        "release_year","rating","duration","listed_in","description"
+    ]
     for col in expected:
         if col not in df.columns:
             df[col] = ""
@@ -585,6 +588,105 @@ def create_dashboard_stats(df: pd.DataFrame) -> dict:
     return stats
 
 # =========================================================
+# EVALUATION + VISUALIZATION (PRECISION@K)
+# =========================================================
+def _genres_set(x: object) -> set:
+    s = _safe_str(x)
+    if not s:
+        return set()
+    return {g.strip().lower() for g in s.split(",") if g.strip()}
+
+def eval_precision_at_k(
+    selected_row: pd.Series,
+    recs: pd.DataFrame,
+    k: int,
+    require_same_type: bool = True,
+    min_genre_overlap: int = 1,
+) -> dict:
+    if recs is None or recs.empty:
+        return {"k": 0, "relevant": 0, "precision": 0.0, "detail": pd.DataFrame()}
+
+    k = int(min(k, len(recs)))
+    topk = recs.head(k).copy()
+
+    sel_type = _safe_str(selected_row.get("type", ""))
+    sel_genres = _genres_set(selected_row.get("listed_in", ""))
+
+    rel_flags = []
+    overlaps = []
+
+    for _, r in topk.iterrows():
+        r_type = _safe_str(r.get("type", ""))
+        r_genres = _genres_set(r.get("listed_in", ""))
+
+        overlap = len(sel_genres.intersection(r_genres))
+        ok_type = (r_type == sel_type) if require_same_type else True
+        ok_genre = overlap >= int(min_genre_overlap)
+
+        rel = bool(ok_type and ok_genre)
+        rel_flags.append(rel)
+        overlaps.append(overlap)
+
+    topk["genre_overlap"] = overlaps
+    topk["relevant"] = rel_flags
+
+    relevant_count = int(np.sum(topk["relevant"].values))
+    precision = (relevant_count / float(k)) if k > 0 else 0.0
+
+    return {"k": k, "relevant": relevant_count, "precision": precision, "detail": topk}
+
+def render_eval_visuals(eval_out: dict) -> None:
+    if not eval_out or eval_out.get("k", 0) == 0:
+        ui_alert("warning", "Evaluasi belum tersedia (rekomendasi kosong).")
+        return
+
+    k = int(eval_out["k"])
+    relevant = int(eval_out["relevant"])
+    precision = float(eval_out["precision"])
+    detail = eval_out["detail"].copy()
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric(f"Precision@{k}", f"{precision:.3f}", f"{precision:.1%}")
+    with m2:
+        st.metric("Relevan (Top-K)", f"{relevant}", f"dari {k}")
+    with m3:
+        st.metric("Tidak relevan", f"{k - relevant}", "")
+
+    st.markdown("### 📈 Visualisasi Precision@K")
+    st.progress(int(round(precision * 100)))
+    st.caption(f"Precision@{k} = {relevant}/{k} = {precision:.3f}")
+
+    st.markdown("### 📊 Relevan vs Tidak Relevan (Top-K)")
+    comp = pd.Series({"Relevan": relevant, "Tidak relevan": k - relevant})
+    st.bar_chart(comp)
+
+    st.markdown("### 🧪 Distribusi Similarity (Top-K)")
+    if "similarity" in detail.columns:
+        sim_bins = pd.cut(detail["similarity"], bins=8).value_counts().sort_index()
+        st.bar_chart(sim_bins)
+        st.caption("Semakin banyak nilai similarity tinggi, biasanya rekomendasi makin konsisten.")
+    else:
+        ui_alert("warning", "Kolom similarity tidak ditemukan untuk visualisasi distribusi.")
+
+    st.markdown("### 🧾 Detail Evaluasi Top-K")
+    show_cols = ["title", "type", "release_year", "listed_in", "genre_overlap", "relevant", "similarity"]
+    show_cols = [c for c in show_cols if c in detail.columns]
+    st.dataframe(detail[show_cols], use_container_width=True)
+
+    st.markdown("### ✍️ Perhitungan Manual (untuk laporan)")
+    ui_alert(
+        "success",
+        f"""
+        <b>Precision@{k}</b><br>
+        1) Tentukan K = {k}<br>
+        2) Hitung jumlah rekomendasi relevan di Top-{k} = {relevant}<br>
+        3) Rumus: Precision@K = relevan / K<br>
+        4) Precision@{k} = {relevant} / {k} = <b>{precision:.3f}</b> ({precision:.1%})
+        """,
+    )
+
+# =========================================================
 # UI CARDS
 # =========================================================
 def display_metric_card(title: str, value: str, subtitle: str = "", icon: str = "📊") -> None:
@@ -662,7 +764,6 @@ def display_recommendation_card(r: pd.Series, rank: int) -> None:
     )
 
 def display_selected_card(item: pd.Series) -> None:
-    """Film/TV yang dipilih tampil seperti card (tanpa similarity)."""
     title = _safe_str(item.get("title", ""))
     content_type = _safe_str(item.get("type", ""))
     year = item.get("release_year", "")
@@ -744,7 +845,7 @@ st.markdown(
 )
 
 # =========================================================
-# SIDEBAR (HANYA MENU + DATASET + STATUS)  ✅ SCROLL
+# SIDEBAR
 # =========================================================
 with st.sidebar:
     st.markdown(
@@ -772,7 +873,7 @@ with st.sidebar:
     use_local = st.checkbox("Gunakan dataset lokal (netflix_titles.csv)", value=True, key="use_local")
 
 # =========================================================
-# LOAD DATA (FIX NameError: uploaded sudah pasti ada)
+# LOAD DATA
 # =========================================================
 raw_df = None
 data_loaded = False
@@ -826,7 +927,6 @@ type_options = ["All"] + unique_types
 min_year = stats.get("min_year", 1900)
 max_year = stats.get("max_year", datetime.now().year)
 
-# Tambah status & statistik ke sidebar (biar kaya, dan bisa discroll)
 with st.sidebar:
     st.markdown('<div class="sidebar-title">📊 STATUS</div>', unsafe_allow_html=True)
     ui_alert("success", "<b>SISTEM AKTIF</b><br>Dataset berhasil diproses")
@@ -878,14 +978,12 @@ if page == "🎯 REKOMENDASI":
             st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
             st.markdown("### 📝 Pilih Judul")
 
-            # Cari judul (opsional)
             title_search = st.text_input(
                 "Cari judul (opsional)",
                 placeholder="Ketik sebagian judul (misal: naruto, money heist, avengers)...",
                 key="title_search",
             )
 
-            # Filter tipe untuk mempermudah list judul
             type_filter_for_titles = st.selectbox(
                 "Tipe konten (untuk list judul)",
                 options=type_options,
@@ -911,9 +1009,6 @@ if page == "🎯 REKOMENDASI":
                 key="title_selector",
             )
 
-            # =========================================================
-            # ✅ FILTER CEPAT DIPINDAH KE BAWAH PILIH JUDUL
-            # =========================================================
             st.markdown("### 🔍 Filter Cepat", unsafe_allow_html=True)
             f1, f2, f3 = st.columns([1.2, 1.2, 1.0])
 
@@ -944,7 +1039,6 @@ if page == "🎯 REKOMENDASI":
 
                     st.markdown("---")
                     st.markdown("## ✅ Konten yang Dipilih")
-                    # ✅ tampil seperti card rekomendasi
                     display_selected_card(selected_item)
 
                     with st.spinner("Mencari rekomendasi terbaik..."):
@@ -965,6 +1059,46 @@ if page == "🎯 REKOMENDASI":
                         ui_alert("success", f"Menampilkan <b>{len(recs)}</b> rekomendasi teratas.")
                         for i, (_, r) in enumerate(recs.iterrows(), 1):
                             display_recommendation_card(r, i)
+
+                        # =========================
+                        # ✅ EVALUASI + VISUALISASI
+                        # =========================
+                        st.markdown("---")
+                        st.markdown("## ✅ Evaluasi Model (Visual)")
+
+                        ecol1, ecol2, ecol3 = st.columns([1.2, 1.2, 1.6])
+                        with ecol1:
+                            eval_k = st.slider(
+                                "K untuk evaluasi",
+                                min_value=5,
+                                max_value=int(min(20, len(recs))),
+                                value=int(min(10, len(recs))),
+                                step=1,
+                                key="eval_k_title",
+                            )
+                        with ecol2:
+                            min_overlap = st.selectbox(
+                                "Minimal genre overlap",
+                                [1, 2, 3],
+                                index=0,
+                                key="min_overlap_title",
+                            )
+                        with ecol3:
+                            require_same_type_eval = st.checkbox(
+                                "Wajib tipe sama (Movie/TV)",
+                                value=True,
+                                key="require_same_type_eval_title",
+                            )
+
+                        eval_out = eval_precision_at_k(
+                            selected_row=selected_item,
+                            recs=recs,
+                            k=eval_k,
+                            require_same_type=require_same_type_eval,
+                            min_genre_overlap=min_overlap,
+                        )
+
+                        render_eval_visuals(eval_out)
 
         with col2:
             st.markdown("## 📊 Statistik Dataset")
