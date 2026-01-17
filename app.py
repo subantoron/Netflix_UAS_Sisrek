@@ -434,10 +434,7 @@ def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
         if old_name in df.columns and new_name not in df.columns:
             df[new_name] = df[old_name]
 
-    expected = [
-        "show_id","type","title","director","cast","country",
-        "release_year","rating","duration","listed_in","description"
-    ]
+    expected = ["show_id","type","title","director","cast","country","release_year","rating","duration","listed_in","description"]
     for col in expected:
         if col not in df.columns:
             df[col] = ""
@@ -588,7 +585,7 @@ def create_dashboard_stats(df: pd.DataFrame) -> dict:
     return stats
 
 # =========================================================
-# EVALUATION + VISUALIZATION (PRECISION@K)
+# EVALUATION + VISUALIZATION (PERSIST WITH SESSION_STATE)
 # =========================================================
 def _genres_set(x: object) -> set:
     s = _safe_str(x)
@@ -685,6 +682,16 @@ def render_eval_visuals(eval_out: dict) -> None:
         4) Precision@{k} = {relevant} / {k} = <b>{precision:.3f}</b> ({precision:.1%})
         """,
     )
+
+# =========================================================
+# SESSION STATE INIT (PENTING!)
+# =========================================================
+if "recs" not in st.session_state:
+    st.session_state["recs"] = pd.DataFrame()
+if "selected_item" not in st.session_state:
+    st.session_state["selected_item"] = None
+if "selected_idx" not in st.session_state:
+    st.session_state["selected_idx"] = None
 
 # =========================================================
 # UI CARDS
@@ -927,6 +934,7 @@ type_options = ["All"] + unique_types
 min_year = stats.get("min_year", 1900)
 max_year = stats.get("max_year", datetime.now().year)
 
+# Sidebar status
 with st.sidebar:
     st.markdown('<div class="sidebar-title">📊 STATUS</div>', unsafe_allow_html=True)
     ui_alert("success", "<b>SISTEM AKTIF</b><br>Dataset berhasil diproses")
@@ -1029,17 +1037,16 @@ if page == "🎯 REKOMENDASI":
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+            # =========================
+            # BUTTON: SIMPAN KE STATE
+            # =========================
             if st.button("🚀 Dapatkan Rekomendasi", type="primary", key="get_recs_btn"):
                 matches = df[df["display_title"] == selected_display]
                 if matches.empty:
                     ui_alert("error", "Judul tidak ditemukan.")
                 else:
-                    idx = matches.index[0]
+                    idx = int(matches.index[0])
                     selected_item = df.loc[idx]
-
-                    st.markdown("---")
-                    st.markdown("## ✅ Konten yang Dipilih")
-                    display_selected_card(selected_item)
 
                     with st.spinner("Mencari rekomendasi terbaik..."):
                         recs = recommend_by_index(
@@ -1052,53 +1059,74 @@ if page == "🎯 REKOMENDASI":
                             year_max=year_max,
                         )
 
-                    st.markdown("---")
-                    if recs.empty:
-                        ui_alert("warning", "Tidak menemukan rekomendasi. Coba longgarkan filter.")
-                    else:
-                        ui_alert("success", f"Menampilkan <b>{len(recs)}</b> rekomendasi teratas.")
-                        for i, (_, r) in enumerate(recs.iterrows(), 1):
-                            display_recommendation_card(r, i)
+                    st.session_state["selected_idx"] = idx
+                    st.session_state["selected_item"] = selected_item
+                    st.session_state["recs"] = recs
 
-                        # =========================
-                        # ✅ EVALUASI + VISUALISASI
-                        # =========================
-                        st.markdown("---")
-                        st.markdown("## ✅ Evaluasi Model (Visual)")
+            # =========================
+            # RENDER HASIL DARI STATE
+            # =========================
+            recs = st.session_state.get("recs", pd.DataFrame())
+            selected_item = st.session_state.get("selected_item", None)
 
-                        ecol1, ecol2, ecol3 = st.columns([1.2, 1.2, 1.6])
-                        with ecol1:
-                            eval_k = st.slider(
-                                "K untuk evaluasi",
-                                min_value=5,
-                                max_value=int(min(20, len(recs))),
-                                value=int(min(10, len(recs))),
-                                step=1,
-                                key="eval_k_title",
-                            )
-                        with ecol2:
-                            min_overlap = st.selectbox(
-                                "Minimal genre overlap",
-                                [1, 2, 3],
-                                index=0,
-                                key="min_overlap_title",
-                            )
-                        with ecol3:
-                            require_same_type_eval = st.checkbox(
-                                "Wajib tipe sama (Movie/TV)",
-                                value=True,
-                                key="require_same_type_eval_title",
-                            )
+            if selected_item is not None and recs is not None and not recs.empty:
+                st.markdown("---")
+                st.markdown("## ✅ Konten yang Dipilih")
+                display_selected_card(selected_item)
 
-                        eval_out = eval_precision_at_k(
-                            selected_row=selected_item,
-                            recs=recs,
-                            k=eval_k,
-                            require_same_type=require_same_type_eval,
-                            min_genre_overlap=min_overlap,
-                        )
+                st.markdown("---")
+                ui_alert("success", f"Menampilkan <b>{len(recs)}</b> rekomendasi teratas.")
+                for i, (_, r) in enumerate(recs.iterrows(), 1):
+                    display_recommendation_card(r, i)
 
-                        render_eval_visuals(eval_out)
+                # =========================
+                # ✅ EVALUASI + VISUALISASI
+                # =========================
+                st.markdown("---")
+                st.markdown("## ✅ Evaluasi Model (Visual)")
+
+                max_k = int(min(20, len(recs)))
+                min_k = int(min(5, max_k))
+                default_k = int(min(10, max_k))
+
+                ecol1, ecol2, ecol3 = st.columns([1.2, 1.2, 1.6])
+                with ecol1:
+                    eval_k = st.slider(
+                        "K untuk evaluasi",
+                        min_value=min_k,
+                        max_value=max_k,
+                        value=default_k,
+                        step=1,
+                        key="eval_k_title",
+                    )
+                with ecol2:
+                    min_overlap = st.selectbox(
+                        "Minimal genre overlap",
+                        [1, 2, 3],
+                        index=0,
+                        key="min_overlap_title",
+                    )
+                with ecol3:
+                    require_same_type_eval = st.checkbox(
+                        "Wajib tipe sama (Movie/TV)",
+                        value=True,
+                        key="require_same_type_eval_title",
+                    )
+
+                eval_out = eval_precision_at_k(
+                    selected_row=selected_item,
+                    recs=recs,
+                    k=eval_k,
+                    require_same_type=require_same_type_eval,
+                    min_genre_overlap=min_overlap,
+                )
+                render_eval_visuals(eval_out)
+
+                if st.button("🧹 Reset Hasil", key="reset_results"):
+                    st.session_state["recs"] = pd.DataFrame()
+                    st.session_state["selected_item"] = None
+                    st.session_state["selected_idx"] = None
+                    st.rerun()
 
         with col2:
             st.markdown("## 📊 Statistik Dataset")
